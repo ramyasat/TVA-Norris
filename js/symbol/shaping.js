@@ -1,5 +1,6 @@
 'use strict';
 
+const icu = require('mapbox-icu-js');
 const scriptDetection = require('../util/script_detection');
 const verticalizePunctuation = require('../util/verticalize_punctuation');
 
@@ -36,32 +37,14 @@ function Shaping(positionedGlyphs, text, top, bottom, left, right, writingMode) 
     this.writingMode = writingMode;
 }
 
-const newLine = 0x0a;
-
-function breakLines(text, lineBreakPoints) {
-    const lines = [];
-    let start = 0;
-    for (const lineBreak of lineBreakPoints) {
-        lines.push(text.substring(start, lineBreak));
-        start = lineBreak;
-    }
-
-    if (start < text.length) {
-        lines.push(text.substring(start, text.length));
-    }
-    return lines;
-}
-
 function shapeText(text, glyphs, maxWidth, lineHeight, horizontalAlign, verticalAlign, justify, spacing, translate, verticalHeight, writingMode) {
-    text = text.trim();
-    if (writingMode === WritingMode.vertical) text = verticalizePunctuation(text);
+    let logicalInput = text.trim();
+    if (writingMode === WritingMode.vertical) logicalInput = verticalizePunctuation(logicalInput);
 
     const positionedGlyphs = [];
-    const shaping = new Shaping(positionedGlyphs, text, translate[1], translate[1], translate[0], translate[0], writingMode);
+    const shaping = new Shaping(positionedGlyphs, logicalInput, translate[1], translate[1], translate[0], translate[0], writingMode);
 
-    const lines = (writingMode === WritingMode.horizontal && maxWidth) ?
-        breakLines(text, determineLineBreaks(text, spacing, maxWidth, glyphs)) :
-        [text];
+    const lines = icu.processBidirectionalText(logicalInput, determineLineBreaks(logicalInput, spacing, maxWidth, glyphs));
 
     shapeLines(shaping, glyphs, lines, lineHeight, horizontalAlign, verticalAlign, justify, translate, writingMode, spacing, verticalHeight);
 
@@ -71,12 +54,8 @@ function shapeText(text, glyphs, maxWidth, lineHeight, horizontalAlign, vertical
     return shaping;
 }
 
-const invisible = {
-    0x20:   true, // space
-    0x200b: true  // zero-width space
-};
-
 const breakable = {
+    0x0a:   true, // newline
     0x20:   true, // space
     0x26:   true, // ampersand
     0x2b:   true, // plus sign
@@ -88,8 +67,6 @@ const breakable = {
     0x2010: true, // hyphen
     0x2013: true  // en dash
 };
-
-invisible[newLine] = breakable[newLine] = true;
 
 function determineIdeographicLineWidth(logicalInput, spacing, maxWidth, glyphs) {
     let totalWidth = 0;
@@ -108,6 +85,8 @@ function determineIdeographicLineWidth(logicalInput, spacing, maxWidth, glyphs) 
     return totalWidth / lineCount;
 }
 
+// Identify good line breaks based on maxWidth
+// Forced line breaks from newlines will be applied by ICU in processBidirectionalText
 function determineLineBreaks(logicalInput, spacing, maxWidth, glyphs) {
     if (!maxWidth)
         return [];
@@ -127,8 +106,7 @@ function determineLineBreaks(logicalInput, spacing, maxWidth, glyphs) {
         const codePoint = logicalInput.charCodeAt(i);
         const glyph = glyphs[codePoint];
 
-        // newlines treatment slightly different from gl-native. See: https://github.com/mapbox/mapbox-gl-native/issues/7253
-        if (!glyph && codePoint !== newLine)
+        if (!glyph)
             continue;
 
         // Ideographic characters, spaces, and word-breaking punctuation that often appear without
@@ -139,16 +117,14 @@ function determineLineBreaks(logicalInput, spacing, maxWidth, glyphs) {
             lastSafeBreakX = currentX;
         }
 
-        // Break at the last safe break if we're over maxWidth. Always break on newlines.
-        if ((currentX > maxWidth && lastSafeBreakIndex > 0) ||
-            codePoint === newLine) {
+        // Break at the last safe break if we're over maxWidth.
+        if (currentX > maxWidth && lastSafeBreakIndex > 0) {
             lineBreakPoints.push(lastSafeBreakIndex);
             currentX -= lastSafeBreakX;
             lastSafeBreakX = 0;
         }
 
-        if (glyph)
-            currentX += glyph.advance + spacing;
+        currentX += glyph.advance + spacing;
     }
 
     return lineBreakPoints;
